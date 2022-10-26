@@ -1,0 +1,332 @@
+\documentclass[12pt, a4paper]{article}
+\usepackage[french]{babel}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[]{amsmath}
+\usepackage[]{amsfonts}
+\usepackage[]{amssymb}
+\usepackage[]{lmodern}
+\usepackage[left=20mm, right=20mm, top=20mm, bottom=20mm]{geometry}
+%\usepackage[]{}
+\title{Exemple concret d'installation de debian en Full Disk Encryption avec une machine en efi.}
+\author{F.S. G.}
+\date{Création le 24 Octobre 2022\\%
+Compilation du \today{}.}
+\begin{document}
+\maketitle
+
+\begin{abstract}
+	Ce document contient les commandes saisies lors de la dernière installation d'un disque dur externe comme disque système en vue de son utilisation sur les ordinateurs soit du travail, soit syndicaux.
+\end{abstract}
+
+\section{La préparation du support}
+
+\subsection{Formatage du disque cible}
+\begin{verbatim}
+fdisk /dev/sdc
+\end{verbatim}
+
+\paragraph{objectif.} Créer deux partitions sur le disque~:
+\begin{itemize}
+	\item un disque dont la table de partition sera de type gpt,
+	\item une partition type EFI de 64 Mo --~le test à 32M montre des problèmes possibles d'après fdisk~-- qui va être la partition démarrable,
+	\item une partition type Linux qui sera tout le reste et va accueillir le système.
+\end{itemize}
+Évidemment si le disque a déjà accueilli une table de partition antérieure, il va être demandé à plusieurs occasions de confirmer l'action destructrice ou créatrice de table de partitions ou de partitions.
+
+\paragraph{La table de partitions.} La table de partitions de type GPT. \newline
+\fbox{g} 
+
+\paragraph{Partition EFI.} Suite de touches pour la création de la partition EFI d'une taille de 64~Mo.
+\fbox{n} puis \fbox{Enter} \fbox{Enter} +64M \fbox{Enter} \fbox{t} \fbox{1}
+
+\paragraph{La partition Linux.} Suite de touches pour la création de la partition Linux occupant le reste du disque. \newline
+\fbox{n}, \fbox{Enter}, \fbox{Enter}, \fbox{Enter}, \fbox{Enter},
+
+\paragraph{Sortie.} Sortie de \texttt{fdisk}, enregistrement et synchronisation. \newline
+\fbox{w}
+
+\subsection{Création de la partition chiffrée.}
+Création de la partition chiffrée type Luks version 1\footnote{%
+Grub2 ne sait pas à ce jour et à ma connaissance gérer les disques entièrement chiffrés en Luks version 2.} 
+en utilisant les paramètres optimum, d'où le benchmark. 
+\begin{verbatim}
+cryptsetup benchmark
+cryptsetup luksFormat -y -v --type=luks1 --hash=sha256 --key-size=256 \
+--cipher=aes-xts-plain64 /dev/sdc2
+\end{verbatim}
+La compilation de cryptsetup par les équipes de debian rend optimal le chiffrement avec une clé de 256~bits et un hashage sha256.
+
+\subsection{Ouverture de la partition chiffrée}
+Le nom qui sera donné à cette partition sera \emph{StarFleet\/}~!
+\begin{verbatim}
+cryptsetup luksOpen /dev/sdc2 StarFleet
+\end{verbatim}
+Désormais la partition est atteignable par le \emph{node\/} \texttt{/dev/mapper/StarFleet} pour toute action.
+
+\subsection{Création du lvm dans la partition chiffrée}
+Dans la partition \texttt{/dev/mapper/StarFleet} vont être créés le volume logique --~système de fichiers~-- par la commande \texttt{pvcreate} puis le nom d'un groupe de volumes au nom de \emph{NCC1701\/} par la commande \texttt{vgcreate}.
+\begin{verbatim}
+pvcreate /dev/mapper/StarFleet
+vgcreate NCC1701 /dev/mapper/StarFleet
+\end{verbatim}
+
+\subsection{Création des partitions dans le lvm}
+Création de trois partitions dans le groupe de volumes \emph{NCC1701\/}, l'une désignée par \emph{racine\/} d'une taille de 50~Go, l'autre, \emph{memoire\/} d'une taille de 8~Go et enfin \emph{utilisateurs\/} occupant tous le reste du disque.
+\begin{verbatim}
+lvcreate NCC1701 -L 50G -n racine
+lvcreate NCC1701 -L 8G -n memoire
+lvcreate NCC1701 -l +100%FREE -n utilisateurs
+\end{verbatim}
+Les partitions seront dédiées aux usages suivants~:
+\begin{itemize}
+	\item la partition \emph{racine\/} accueillera l'ensemble des logiciels, paramètres, réglages et autres caches,
+	\item la partition \emph{memoire\/} sera dédiée à la mémoire additionnelle, le \emph{swap\/},
+	\item la partition \emph{utilisateurs\/} recevra les données et paramètres des utilisateurs.
+\end{itemize}
+
+\subsection{Formatage de toutes les partitions}
+Formatage de la partition EFI en FAT32, des partitions racine et utilisateurs en EXT4, et de la partition memoire en SWAP.
+\begin{verbatim}
+mkfs.fat -F32 /dev/sdc1
+mkfs.ext4 /dev/NCC1701/racine
+mkfs.ext4 /dev/NCC1701/utilisateurs
+mkswap /dev/NCC1701/memoire
+\end{verbatim}
+
+\subsection{démontage du swap et de l'efi de l'hôte, activation du swap de la cible}
+Afin d'éviter toute interférence avec le futur système, démontage de la partition EFI actuelle, puis du swap actuel et activation du swap du futur système.
+\begin{verbatim}
+umount /boot/efi
+swapoff -a
+swapon /dev/NCC1701/memoire
+\end{verbatim}
+
+\subsection{création des points de montage pour l'installation}
+Je vais accrocher le futur système comme une arborescence prenant racine au dossier \texttt{/mnt}.
+\begin{verbatim}
+mkdir -p /mnt/{boot/efi,home}
+\end{verbatim}
+J'ai besoin de créer la sous-arborestcence suivante~:
+\begin{verbatim}
+/ (actuellement /mnt, future racine)
++-- home (utilisateurs futurs)
++-- boot/
+....+-- efi (partition EFI placée au bon endroit)
+\end{verbatim}
+
+\subsection{montage des différentes partitions}
+Puisque les points d'accrochage des partitions de la cible sont créés, il est temps de les y accrocher, en suivant l'ordre d'imbrication.
+\begin{verbatim}
+mount /dev/NCC1701/racine /mnt
+mount /dev/NCC1701/utilisateurs /mnt/home
+mount /dev/sdc1 /mnt/boot/efi
+\end{verbatim}
+
+\subsection{mise à jour des paquets, installation des outils}
+J'installe dans l'hôte les outils nécessaires pour pouvoir installer le système de base dans la cible.
+\begin{verbatim}
+apt update
+apt install wget debootstrap
+\end{verbatim}
+
+\subsection{installation de la base dans la cible}
+La commande \texttt{debootstrap} est celle qui fonctionne pour installer le système de base. 
+L'ordre des paramètres est important~!
+Notez que grâce à cela il est possible aussi d'installer le système pour une autre architecture via le paramètre \texttt{--arch=} de choisir la distribution, ici \emph{bullseye\/} de préciser le point où est accroché la cible, j'ai choisi \texttt{/mnt} mais par exemple dans l'installateur classique debian celui-ci choisit \texttt{/target} et enfin le serveur web contenant les paquets de la distribution debian à installer.
+\begin{verbatim}
+debootstrap --arch=amd64 bullseye /mnt http://ftp.fr.debian.org/debian/
+\end{verbatim}
+
+\subsection{Montages nécessaires pour le chroot}
+Le \texttt{chroot} (\textbf{ch}ange \textbf{root}) nécessite avant son exécution que certains \emph{nodes\/} du système soient liés intrinsèquement.
+\begin{verbatim}
+mount --rbind /dev /mnt/dev
+mount --rbind /sys /mnt/sys
+mount --rbind /proc /mnt/proc
+mount --make-rslave /mnt/dev
+mount --make-rslave /mnt/sys
+mount --make-rslave /mnt/proc
+\end{verbatim}
+
+\subsection{copie du fichier de résolution et chroot}
+Avant de passer dans le nouvel environnement via \texttt{chroot} copie du fichier contenant le serveur dns pour pouvoir ensuite utiliser la connexion internet de l'hôte afin de télécharger la suite des paquets.
+\begin{verbatim}
+cp -v /etc/resolv.conf /mnt/etc/
+chroot /mnt /bin/bash
+\end{verbatim}
+
+\section{la configuration dans le chroot}
+Toute cette partie se situe dans le nouvel environnement.
+
+\subsection{mot de passe de root}
+Comme j'ai souvent tendance à l'oublier, autant commencer par donner à l'administrateur du futur système un mot de passe.
+\begin{verbatim}
+passwd root
+\end{verbatim}
+
+\subsection{modification des hosts et hostname}
+Ensuite il est temps de configurer le nom réseau à cette nouvelle machine, je l'appelle \emph{Enterprise\/} pour rester dans la même thématique que le nom du volume chiffré et celui du groupe de volumes.
+\begin{verbatim}
+echo Enterprise > /etc/hostname
+echo "127.0.1.1    Enterprise" >> /etc/hosts
+\end{verbatim}
+Ce nom est attribué dans le fichier \texttt{hostname} mais aussi ajouté dans le fichier \texttt{hosts} avec l'adresse spécifique 127.0.1.1 demandée par certains environnements.
+
+\subsection{édition du /etc/apt/sources.list et mise à jour des paquets}
+Il est indispensable, surtout lorsque le système utilise du matériel non-libre ou que des logiciels nécessitant des pilotes non-libres voire non-libres eux-mêmes, de modifier la liste des sources logicielles située dans le fichier \texttt{sources.list} 
+\begin{verbatim}
+nano -cil /etc/apt/sources.list
+\end{verbatim}
+
+\paragraph{Exemple.} Fichier \texttt{/etc/apt/sources.list}.
+\begin{verbatim}
+deb http://ftp.fr.debian.org/debian bullseye main contrib non-free
+deb http://ftp.fr.debian.org/debian bullseye-updates main contrib non-free
+deb http://ftp.fr.debian.org/debian bullseye-proposed-updates main contrib non-free
+deb http://ftp.fr.debian.org/debian bullseye-backports main contrib non-free
+deb http://ftp.fr.debian.org/debian-security bullseye-security main contrib non-free
+\end{verbatim}
+
+\subsection{mise à jour des paquets de la cible}
+Puis vient la mise à jour de la liste des versions de logiciels et des logiciels déjà installés, ce qui arrive parfois.
+\begin{verbatim}
+apt update
+apt upgrade -y
+\end{verbatim}
+
+\subsection{installation d'outils et de la configuration des locales et de la timezone}
+Il est ensuite temps d'installer de quoi configurer la régionalisation du système, et un outil \texttt{pciutils} qui va identifier le matériel présent. 
+On peut aussi ajouter \texttt{usbtils} si tout le matériel n'est pas retrouvé grâce à pciutils. 
+\begin{verbatim}
+apt install locales console-setup pciutils
+dpkg-reconfigure tzdata
+dpkg-reconfigure locales
+dpkg-reconfigure console-setup
+\end{verbatim}
+\paragraph{Note.} \texttt{tzdata} a été installé déjà dans le \emph{base-system} avec \texttt{debootstrap}.
+
+\subsection{Ajout des informations vers les fichier /etc/crypttab et /etc/fstab}
+\begin{verbatim}
+echo "StarFleet UUID=$(blkid -o value -s UUID /dev/sdc2) none luks" >> /etc/cryptab
+blkid | grep NCC1701 >> /etc/fstab
+blkid | grep sdc1 >> /etc/fstab
+nano -cil /etc/fstab
+\end{verbatim}
+Ces informations permettent de générer un fichier fstab correct. 
+La ligne concernant crypttab permet de configurer le fichier directement sans avoir à l'ouvrir. 
+Un mot de passe sera nécessaire au démarrage pour ouvrir la partition chiffrée qui accueille le lvm.
+Les quatre champs du fichier \texttt{crypttab} sont séparés par des tabulations ce qui ne se voit pas forcément dans la ligne montrée ci-avant.
+
+\paragraph{Exemple.} Le fichier \texttt{/etc/crypttab} dans ma config.
+\begin{verbatim}
+StarFleet    UUID=4037ccc6-4410-4fff-80ee-b2099a46c33e    none    luks
+\end{verbatim}
+
+Ensuite on s'occupe du fichier \texttt{fstab} comme le montre la dernière commande des quatre lignes précédentes~:
+\paragraph{Exemple.} Fichier \texttt{/etc/fstab}
+\begin{verbatim}
+/dev/NCC1701/racine  /   ext4   rw,errrors=remount-ro  0  1
+/dev/NCC1701/memoire swap  swap  sw  0  0
+/dev/NCC1701/utilisateurs /home  ext4  defaults  0  2
+UUID=(uuid de /dev/sdc1)  /boot/efi  vfat  umask=0077  0  2
+\end{verbatim}
+
+\subsection{Édition de la configuration du clavier.}
+Vient le moment de configurer le clavier.
+\begin{verbatim}
+nano -w /dec/default/keyboard
+\end{verbatim}
+Dans le fichier peut-être que la ligne \texttt{XKBLAOUT} est déjà en \texttt{"fr"}, mais dans les lignes qui viennent voici la configuration telle que je l'ai laissée au moment d'enregistrer le fichier.
+
+\paragraph{Exemple.} Voici les lignes telles qu'elles doivent être configurées pour le support du clavier français.
+\begin{verbatim}
+XKBMODEL="pc105"
+XKBLAYOUT="fr"
+XKBVARIANT="latin9"
+\end{verbatim}
+
+\subsection{Installation du noyau et des outils divers}
+C'est l'heure d'installer le noyau. 
+La mention \texttt{firmware-***} correspond à la recherche de firmwares particuliers pour certaines cartes via la commande \texttt{lspci} et en recherchant par exemple les lignes spécifiques contenant des mots tels que ``VGA'' pour la carte graphique, ``Network'' ou ``Wireless Network'' pour le wifi ou encore ``Ethernet'' pour la carte réseau filaire.
+\begin{verbatim}
+apt install linux-image-amd64 lvm2 cryptsetup dhcpcd5 sudo grub-efi-amd64 \
+firmware-***
+\end{verbatim}
+C'est la raison pour laquelle cette mention \texttt{firmware-***} a été déportée en seconde ligne mais doit être écrite à la suite de \verb|\| puisque sinon la ligne allait sortir de la page.
+
+\subsection{Modification du fichier de configuration de grub}
+Avant de poursuivre il faut modifier le fichier de configuration de grub, situé à \texttt{/etc/default/grub}, je vais lui ajouter, donc en fin de fichier, la valeur de l'UUID de la partition chiffrée qui doit être déchiffrée au démarrage par un mot de passe saisi manuellement. 
+Ce travail est l'objet de la première ligne. 
+La seconde ligne permet l'édition de ce fichier pour y déplacer cet UUID puis d'ajouter des fichiers
+\begin{verbatim}
+echo $(blkid -o value -s UUID /dev/sdc2) >> /etc/default/grub
+nano -w /etc/default/grub
+\end{verbatim}
+Il est possible de procéder autrement selon les capacités et aptitudes de chaque personne.
+
+Voici les modifications apportées~:\newline
+\verb|GRUB\_CMDLINE_LINUX=""| devient
+\begin{verbatim}
+GRUB_CMDLINE_LINUX="cryptdevice=UUID=(uuid de /dev/sdc2):StarFleet"
+\end{verbatim}
+
+ajouter au fichier~:
+\begin{verbatim}
+GRUB_ENABLE_CRYPTODISK=y
+GRUB_DISABLE_OS_PROBER=true
+\end{verbatim}
+
+\subsection{Régénération de l'initramfs}
+Une fois le fichier \texttt{/etc/default/grub} modifié, il est temps de générer l'initramfs, image linux minimaliste en charge d'être copiée en mémoire vive au démarrage du système afin qu'elle vérifie le système qui sera ensuite lancé pour l'utilisateur.
+\begin{verbatim}
+update-initramfs -u
+\end{verbatim}
+Si aucune erreur n'est signalée, il est temps ensuite de passer à la suite~!
+
+\subsection{Installation de grub avec support de l'efi}
+Désormais il est temps d'installer grub, puisque c'est le \emph{bootloader\/} que je choisis en lui passant les bons paramètres qui déborderaient de la ligne, aussi ai-je coupé cette ligne en deux.
+\begin{verbatim}
+grub-install --target=x86_64-efi --efi-directory=/boot/efi \
+ --bootloader-id=debian --uefi-secure-boot /dev/sdc
+\end{verbatim}
+Ne vous trompez pas de disque~! 
+Le disque cible est bien \emph{sdc}.
+
+Puis vient la phase de génération de la configuration de grub. 
+\begin{verbatim}
+grub-mkconfig -o /boot/grub/grub.cfg
+\end{verbatim}
+
+Les commandes chez debian sont traditionnellement~: \texttt{update-grub} ou \texttt{update-grub2} mais ce sont en fait des alias pour la commande précédente.
+
+\subsection{ajout de l'utilisateur courant}
+Pour le démarrage viendra ensuite un utilisateur courant, il n'est pas nécessaire de l'ajouter au groupe des administrateurs (\emph{sudo\/}) mais je le fais ici.
+\begin{verbatim}
+adduser utilisateur
+adduser utilisateur sudo
+\end{verbatim}
+
+\subsection{ajout de quelques paquets pour le futur système}
+Comme je souhaite au démarrage avoir une interface graphique et quelques logiciels, je choisis ici de les installer, 
+\begin{verbatim}
+apt install xorg lightdm lightdm-gtk-greeter xfce4 xfce4-goodies \
+network-manager network-manager-gnome wpasupplicant dialog etc...
+\end{verbatim}
+
+\paragraph{Remarque.} \texttt{apt-cache search task-} pour afficher tous les métapaquets permettant d'installer des configurations prêtes à l'emploi ou presque.
+
+\section{Sortie du chroot et reboot de la machine.}
+D'abord sortie de l'environnement \texttt{chroot}é
+\begin{verbatim}
+exit
+\end{verbatim}
+
+Puis redémarrage de la machine, c'est la méthode la plus propre actuellement testée pour détacher le disque cible de la machine hôte.
+\begin{verbatim}
+reboot
+\end{verbatim}
+
+Normalement vous avez désormais un disque externe contenant une debian chiffrée minimaliste prête à être utilisée sur une machine fonctionnant en EFI.
+
+\end{document}
